@@ -267,68 +267,22 @@ function getReplacement(
     return substr;
   }
 
-  const matches = commentedFilename.match(/\s?(\S+?)((#L(\d+)-L(\d+))|$)/m);
-
-  if (!matches) {
-    log({ returnSnippet: substr }, chalk => chalk.gray(`No file found in embed line`));
-    return substr;
-  }
-
-  const [, filename, , lineNumbering, startLine, endLine] = matches;
-  if (filename.includes('#')) {
+  let filename: string, outputCode: string;
+  // check line numbers
+  if (getLineNumberMatches(commentedFilename)) {
+    [filename, outputCode] = lineNumberCheck(commentedFilename, inputFilePath, lineEnding, log, options, substr);
+  } else if (getRegexMatches(commentedFilename)) {
+    [filename, outputCode] = regexCheck(commentedFilename, inputFilePath, lineEnding, log, options, substr);
+  } else {
     log({ returnSnippet: substr }, chalk =>
       chalk.red(
-        `Incorrectly formatted line numbering string ${chalk.underline(
+        `Output snippet for file ${chalk.underline(
           filename,
-        )}, Expecting Github formatting e.g. #L10-L20`,
+        )} contains a code fence. Refusing to embed as that would break the document`,
       ),
     );
     return substr;
   }
-
-  const relativePath = options.sourceRoot
-    ? resolve(process.cwd(), options.sourceRoot, filename)
-    : resolve(inputFilePath, '..', filename);
-
-  if (!existsSync(relativePath)) {
-    log({ returnSnippet: substr }, chalk =>
-      chalk.red(
-        `Found filename ${chalk.underline(
-          filename,
-        )} in comment in first line, but file does not exist at ${chalk.underline(relativePath)}!`,
-      ),
-    );
-    return substr;
-  }
-
-  const file = readFileSync(relativePath, 'utf8');
-
-  let lines = file.split(lineEnding);
-  if (lineNumbering) {
-    lines = lines.slice(+startLine - 1, +endLine);
-  }
-
-  const minimumLeadingSpaces = lines.reduce((minSpaces: number, line: string) => {
-    if (minSpaces === 0) {
-      return 0;
-    }
-
-    if (line.length === 0) {
-      return Infinity; //empty lines shouldn't count
-    }
-
-    const leadingSpaces = line.match(/^[\s]+/m);
-
-    if (!leadingSpaces) {
-      return 0;
-    }
-
-    return Math.min(minSpaces, leadingSpaces[0].length);
-  }, Infinity);
-
-  lines = lines.map(line => line.slice(minimumLeadingSpaces));
-
-  const outputCode = lines.join(lineEnding);
 
   if (/```/.test(outputCode)) {
     log({ returnSnippet: substr }, chalk =>
@@ -367,13 +321,125 @@ function getReplacement(
 
   log({ returnSnippet: replacement }, chalk =>
     chalk[chalkColour](
-      `Embedded ${chalk[(chalkColour + 'Bright') as 'greenBright'](lines.length + ' lines')}${
-        options.stripEmbedComment ? chalk.italic(' without comment line') : ''
+      `Embedded ${chalk[(chalkColour + 'Bright') as 'greenBright'](lines.length + ' lines')}${options.stripEmbedComment ? chalk.italic(' without comment line') : ''
       } from file ${chalk.underline(commentedFilename)}`,
     ),
   );
 
   return replacement;
+}
+
+function readFile(filename: string, inputFilePath: string, log: CallableFunction, options: EmbedmeOptions, substr: string) {
+  if (filename.includes('#')) {
+    log({ returnSnippet: substr }, chalk =>
+      chalk.red(
+        `Incorrectly formatted line numbering string ${chalk.underline(
+          filename,
+        )}, Expecting Github formatting e.g. #L10-L20`,
+      ),
+    );
+    return substr;
+  }
+
+  const relativePath = options.sourceRoot
+    ? resolve(process.cwd(), options.sourceRoot, filename)
+    : resolve(inputFilePath, '..', filename);
+
+  if (!existsSync(relativePath)) {
+    log({ returnSnippet: substr }, chalk =>
+      chalk.red(
+        `Found filename ${chalk.underline(
+          filename,
+        )} in comment in first line, but file does not exist at ${chalk.underline(relativePath)}!`,
+      ),
+    );
+    return substr;
+  }
+
+  const file = readFileSync(relativePath, 'utf8');
+
+  return file;
+}
+
+function getRegexMatches(input: string) {
+  const matchesRegex = input.match(/\s?(\S+?)((#R:(\/.*\/[a-z]*))|$)/im);
+
+  return matchesRegex;
+}
+
+function regexCheck(commentedFilename: string, inputFilePath: string, lineEnding: string, log: CallableFunction, options: EmbedmeOptions, substr: string) {
+  // regex check
+  const matchesRegex = getRegexMatches(commentedFilename);
+
+  if (!matchesRegex) {
+    log({ returnSnippet: substr }, chalk => chalk.gray(`No file found in embed line`));
+    return substr;
+  }
+
+  const [, filename, , regexMatching, extractedRegex, extractedModifiers] = matchesRegex;
+
+  // read file
+  const file: string = readFile(filename, inputFilePath, log, options, substr);
+
+  const regex = new RegExp(extractedRegex, extractedModifiers);
+  const targetMatches = file.match(regex);
+
+  let outputCode: string = '';
+  if (targetMatches) {
+    outputCode = targetMatches[0];
+  }
+
+  return [filename, outputCode]
+}
+
+function getLineNumberMatches(input: string) {
+  const matches = input.match(/\s?(\S+?)((#L(\d+)-L(\d+))|$)/m);
+
+  return matches;
+}
+
+function lineNumberCheck(commentedFilename: string, inputFilePath: string, lineEnding: string, log: CallableFunction, options: EmbedmeOptions, substr: string) {
+  // line numbers
+  const matches = getLineNumberMatches(commentedFilename);
+
+  if (!matches) {
+    log({ returnSnippet: substr }, chalk => chalk.gray(`No file found in embed line`));
+    return substr;
+  }
+
+  const [, filename, , lineNumbering, startLine, endLine] = matches;
+
+  // read file
+  const file = readFile(filename, inputFilePath, log, options, substr);
+
+  let lines = file.split(lineEnding);
+  if (lineNumbering) {
+    lines = lines.slice(+startLine - 1, +endLine);
+  }
+
+  const minimumLeadingSpaces = lines.reduce((minSpaces: number, line: string) => {
+    if (minSpaces === 0) {
+      return 0;
+    }
+
+    if (line.length === 0) {
+      return Infinity; //empty lines shouldn't count
+    }
+
+    const leadingSpaces = line.match(/^[\s]+/m);
+
+    if (!leadingSpaces) {
+      return 0;
+    }
+
+    return Math.min(minSpaces, leadingSpaces[0].length);
+  }, Infinity);
+
+  lines = lines.map(line => line.slice(minimumLeadingSpaces));
+
+  const outputCode = lines.join(lineEnding);
+
+  return [filename, outputCode, lines];
 }
 
 function getLineNumber(text: string, index: number, lineEnding: string): number {
